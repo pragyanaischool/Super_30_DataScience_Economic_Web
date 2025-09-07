@@ -25,14 +25,12 @@ def scrape_tables_from_url(url):
         response = requests.get(url.strip(), headers={'User-Agent': 'Mozilla/5.0'})
         if response.status_code == 200:
             try:
-                # Explicitly use lxml parser for pandas read_html
                 tables = pd.read_html(response.content, flavor='lxml')
             except ImportError:
                 st.error("lxml parser is not installed. Please install it using 'pip install lxml' and restart the app.")
                 return []
             except ValueError:
                 try:
-                    # fallback to bs4 parser if lxml fails and bs4 is installed
                     tables = pd.read_html(response.content, flavor='bs4')
                 except Exception as e2:
                     st.error(f"Failed to parse tables using lxml and bs4 parsers: {e2}")
@@ -162,18 +160,18 @@ with st.sidebar:
     else:
         st.markdown('<style>body{background-color:white;color:black;}</style>', unsafe_allow_html=True)
 
-    # Export button if filtered data available
+    # Export filtered data if available
     if 'filtered_df' in st.session_state:
         df_xlsx = to_excel(st.session_state.filtered_df)
         st.download_button(label="Download Filtered Data as Excel", data=df_xlsx, file_name="filtered_data.xlsx")
 
-# Session state defaults
+# Ensure defaults
 if 'page_state' not in st.session_state:
     st.session_state.page_state = 'initial'
 if 'data_frames' not in st.session_state:
     st.session_state.data_frames = []
 
-# --- Main Analysis UI ---
+# --- Main UI ---
 if st.session_state.page_state == 'data_loaded':
     if not st.session_state.data_frames:
         st.warning("No data loaded. Use the sidebar to scrape or upload data.")
@@ -202,11 +200,12 @@ if st.session_state.page_state == 'data_loaded':
 
             st.markdown("---")
             st.subheader("Summary Statistics")
+
+            # Fix: only call lower() on string column names
+            country_cols = [col for col in filtered_df.columns if isinstance(col, str) and 'country' in col.lower()]
+            gdp_cols = [col for col in filtered_df.columns if isinstance(col, str) and any(key in col.lower() for key in ['gdp', 'income', 'per capita'])]
             st.dataframe(filtered_df.describe())
 
-            # Geo plot
-            country_cols = [col for col in filtered_df.columns if 'country' in col.lower()]
-            gdp_cols = [col for col in filtered_df.columns if any(key in col.lower() for key in ['gdp', 'income', 'per capita'])]
             if country_cols and gdp_cols:
                 st.markdown("---")
                 st.subheader("Geospatial GDP Visualization")
@@ -243,7 +242,7 @@ if st.session_state.page_state == 'data_loaded':
                             plot_df = plot_df.groupby(group_col)[y_axis_col].agg(agg_func.lower()).reset_index()
                             y_axis_col_plot = y_axis_col
                     else:
-                        y_axis_col_plot = y_axis_col
+                        y_axis_col_plot = y_axis
                     plot_df[y_axis_col_plot] = pd.to_numeric(plot_df[y_axis_col_plot], errors='coerce')
                     plot_df = plot_df.dropna(subset=[y_axis_col_plot])
                     if chart_type == "Line Chart":
@@ -287,6 +286,5 @@ if st.session_state.page_state == 'data_loaded':
                         st.markdown(href, unsafe_allow_html=True)
                 else:
                     st.warning("Please generate a chart and write an analysis before exporting the report.")
-
 else:
     st.info("Select a data input method from the sidebar and paste a URL to parse tables, then select tables to proceed.")
