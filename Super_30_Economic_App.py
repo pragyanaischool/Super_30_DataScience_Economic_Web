@@ -1,17 +1,14 @@
 import streamlit as st
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
-import plotly.express as px
-import plotly.graph_objects as go
 from io import BytesIO
 import base64
-import numpy as np
 import tempfile
 from fpdf import FPDF
+import plotly.express as px
 import geopandas as gpd
 
-# --- Configuration and Helper Functions ---
+# --- Config & Helpers ---
 st.set_page_config(
     page_title="Advanced Economic Data Dashboard",
     layout="wide",
@@ -22,49 +19,39 @@ st.title("Advanced Economic Data Analytics & Report Generator")
 st.markdown("---")
 
 @st.cache_data(ttl=3600)
-def scrape_tables_from_url(url, table_index=None):
-    """Scrapes tables from a given URL; if table_index given, returns that table only."""
+def scrape_tables_from_url(url):
+    """Scrapes all tables from URL and returns list of DataFrames."""
     try:
-        response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+        response = requests.get(url.strip(), headers={'User-Agent': 'Mozilla/5.0'})
         if response.status_code == 200:
             tables = pd.read_html(response.content)
             if not tables:
-                st.warning("No tables were found on the provided URL.")
+                st.warning("No tables found on the provided URL.")
                 return []
-            if table_index is not None:
-                if 0 <= table_index < len(tables):
-                    return [tables[table_index]]
-                else:
-                    st.error(f"Table index {table_index} is out of range. URL has {len(tables)} tables.")
-                    return []
             return tables
         else:
-            st.error(f"Failed to retrieve content from {url}. Status code: {response.status_code}")
+            st.error(f"Failed to retrieve content from {url}, status code: {response.status_code}")
             return []
     except Exception as e:
-        st.error(f"An error occurred during web scraping: {e}")
+        st.error(f"Error during web scraping: {e}")
         return []
 
 def filter_numeric_range(df, col):
     if not pd.api.types.is_numeric_dtype(df[col]):
         return df
-    min_val = df[col].min()
-    max_val = df[col].max()
-    selected_range = st.sidebar.slider(f"Filter '{col}' range:", float(min_val), float(max_val), (float(min_val), float(max_val)))
-    filtered_df = df[(df[col] >= selected_range[0]) & (df[col] <= selected_range[1])]
-    return filtered_df
+    min_val, max_val = float(df[col].min()), float(df[col].max())
+    selected_range = st.sidebar.slider(f"Filter '{col}' range:", min_val, max_val, (min_val, max_val))
+    filtered = df[(df[col] >= selected_range[0]) & (df[col] <= selected_range[1])]
+    return filtered
 
 def to_excel(df):
     output = BytesIO()
-    writer = pd.ExcelWriter(output, engine='xlsxwriter')
-    df.to_excel(writer, index=False, sheet_name='Data')
-    writer.save()
-    processed_data = output.getvalue()
-    return processed_data
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Data')
+    return output.getvalue()
 
 def create_pdf_report(title, data_md, analysis_text, chart_path=None):
     pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
     pdf.cell(0, 10, title, ln=True, align='C')
@@ -87,7 +74,6 @@ def plot_gdp_geoplot(df, country_col, gdp_col):
         df['country_lower'] = df[country_col].astype(str).str.lower()
         world['name_lower'] = world['name'].str.lower()
         merged = world.merge(df, how='left', left_on='name_lower', right_on='country_lower')
-
         fig = px.choropleth(
             merged,
             geojson=merged.geometry,
@@ -103,32 +89,48 @@ def plot_gdp_geoplot(df, country_col, gdp_col):
     except Exception as e:
         st.error(f"Error generating Geo plot: {e}")
 
-# Sidebar: Select input mode and capture inputs
+# --- Sidebar Input ---
 with st.sidebar:
     st.header("Data Input Options")
     input_mode = st.radio("Select Input Mode:", ["Website Scraping", "Upload CSV File"])
 
     if input_mode == "Website Scraping":
         url_input = st.text_area("Paste Website URL here:", height=80)
-        table_idx_input = st.number_input("Table Index (0-based):", min_value=0, step=1)
-        scrape_button = st.button("Scrape Website Data")
+        parse_button = st.button("Parse Website for Tables")
 
-        if scrape_button:
+        if parse_button:
             if not url_input.strip():
                 st.warning("Please enter a valid URL.")
             else:
-                st.session_state.data_frames = scrape_tables_from_url(url_input.strip(), table_idx_input)
-                if not st.session_state.data_frames:
-                    st.session_state.data_frames = []
-                    st.warning("No tables could be scraped from the URL or invalid table index.")
+                tables = scrape_tables_from_url(url_input)
+                if tables:
+                    st.session_state.scraped_tables = tables
+                    st.session_state.page_state = "table_selection"
+                    st.session_state.url_for_scrape = url_input
                 else:
-                    st.session_state.page_state = 'data_loaded'
-                    st.success(f"Scraped {len(st.session_state.data_frames)} table(s) successfully.")
+                    st.session_state.scraped_tables = []
+                    st.session_state.page_state = "initial"
+
+        if st.session_state.get("page_state") == "table_selection" and st.session_state.get("scraped_tables"):
+            table_options = [f"Table {i} - Shape: {df.shape}" for i, df in enumerate(st.session_state.scraped_tables)]
+            selected_table_indices = st.multiselect(
+                "Select Tables to Load (choose one or more):",
+                options=list(range(len(table_options))),
+                format_func=lambda x: table_options[x]
+            )
+            load_tables_btn = st.button("Load Selected Tables")
+            if load_tables_btn:
+                selected_tables = [st.session_state.scraped_tables[i] for i in selected_table_indices]
+                if selected_tables:
+                    st.session_state.data_frames = selected_tables
+                    st.session_state.page_state = "data_loaded"
+                    st.success(f"Loaded {len(selected_tables)} table(s) for analysis.")
+                else:
+                    st.warning("Please select at least one table to load.")
 
     elif input_mode == "Upload CSV File":
         uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
         upload_button = st.button("Load Uploaded File")
-
         if upload_button:
             if uploaded_file is not None:
                 try:
@@ -148,18 +150,18 @@ with st.sidebar:
     else:
         st.write('<style>body{background-color:white;color:black;}</style>', unsafe_allow_html=True)
 
-    # Export button
+    # Export button if filtered data available
     if 'filtered_df' in st.session_state:
         df_xlsx = to_excel(st.session_state.filtered_df)
         st.download_button(label="Download Filtered Data as Excel", data=df_xlsx, file_name="filtered_data.xlsx")
 
-# Initialize session state
+# Defaults for session state
 if 'page_state' not in st.session_state:
     st.session_state.page_state = 'initial'
 if 'data_frames' not in st.session_state:
     st.session_state.data_frames = []
 
-# Main UI after data load
+# --- Main Analysis UI ---
 if st.session_state.page_state == 'data_loaded':
     if not st.session_state.data_frames:
         st.warning("No data loaded. Use the sidebar to scrape or upload data.")
@@ -178,7 +180,6 @@ if st.session_state.page_state == 'data_loaded':
         if selected_df is not None:
             st.markdown("---")
             st.subheader("Data Filtering")
-
             numeric_cols = [col for col in selected_df.columns if pd.api.types.is_numeric_dtype(selected_df[col])]
             filtered_df = selected_df.copy()
             for col in numeric_cols:
@@ -191,7 +192,6 @@ if st.session_state.page_state == 'data_loaded':
             st.subheader("Summary Statistics")
             st.dataframe(filtered_df.describe())
 
-            # Geo plot section
             country_cols = [col for col in filtered_df.columns if 'country' in col.lower()]
             gdp_cols = [col for col in filtered_df.columns if any(key in col.lower() for key in ['gdp', 'income', 'per capita'])]
             if country_cols and gdp_cols:
@@ -203,7 +203,6 @@ if st.session_state.page_state == 'data_loaded':
 
             st.markdown("---")
             st.subheader("Chart Customization")
-
             available_columns = list(filtered_df.columns)
             x_axis_col = st.selectbox("Select X-Axis Column:", available_columns, key="x_axis")
             y_axis_col = st.selectbox("Select Y-Axis Column:", numeric_cols, key="y_axis")
@@ -232,10 +231,8 @@ if st.session_state.page_state == 'data_loaded':
                             y_axis_col_plot = y_axis_col
                     else:
                         y_axis_col_plot = y_axis_col
-
                     plot_df[y_axis_col_plot] = pd.to_numeric(plot_df[y_axis_col_plot], errors='coerce')
                     plot_df = plot_df.dropna(subset=[y_axis_col_plot])
-
                     if chart_type == "Line Chart":
                         fig = px.line(plot_df, x=x_axis_col if group_col is None else group_col, y=y_axis_col_plot, color=color_col)
                     elif chart_type == "Bar Chart":
@@ -248,14 +245,11 @@ if st.session_state.page_state == 'data_loaded':
                         fig = px.box(plot_df, x=x_axis_col if group_col is None else group_col, y=y_axis_col_plot, color=color_col)
                     elif chart_type == "Histogram":
                         fig = px.histogram(plot_df, x=y_axis_col_plot, color=color_col)
-
                     st.plotly_chart(fig, use_container_width=True)
-
                     chart_path = "chart.png"
                     fig.write_image(chart_path)
                     st.session_state.chart_path = chart_path
                     st.session_state.chart_generated = True
-
                 except Exception as e:
                     st.error(f"Error generating chart: {e}")
             else:
@@ -263,9 +257,7 @@ if st.session_state.page_state == 'data_loaded':
 
             st.markdown("---")
             st.subheader("Analysis & Report")
-
             user_analysis = st.text_area("Enter your detailed analysis here:", height=250)
-
             if st.button("Generate PDF Report"):
                 if user_analysis and selected_df is not None:
                     data_md = filtered_df.head(500).to_markdown(index=False)
@@ -284,4 +276,4 @@ if st.session_state.page_state == 'data_loaded':
                     st.warning("Please generate a chart and write an analysis before exporting the report.")
 
 else:
-    st.info("Select a data input method from the sidebar and provide input to load data.")
+    st.info("Select a data input method from the sidebar and paste a URL to parse tables, then select tables to proceed.")
