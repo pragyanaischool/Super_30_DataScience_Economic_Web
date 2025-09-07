@@ -24,7 +24,19 @@ def scrape_tables_from_url(url):
     try:
         response = requests.get(url.strip(), headers={'User-Agent': 'Mozilla/5.0'})
         if response.status_code == 200:
-            tables = pd.read_html(response.content)
+            try:
+                # Explicitly use lxml parser for pandas read_html
+                tables = pd.read_html(response.content, flavor='lxml')
+            except ImportError:
+                st.error("lxml parser is not installed. Please install it using 'pip install lxml' and restart the app.")
+                return []
+            except ValueError:
+                try:
+                    # fallback to bs4 parser if lxml fails and bs4 is installed
+                    tables = pd.read_html(response.content, flavor='bs4')
+                except Exception as e2:
+                    st.error(f"Failed to parse tables using lxml and bs4 parsers: {e2}")
+                    return []
             if not tables:
                 st.warning("No tables found on the provided URL.")
                 return []
@@ -146,16 +158,16 @@ with st.sidebar:
     # Theme selector
     theme = st.selectbox("Select Theme:", ["Light", "Dark"])
     if theme == "Dark":
-        st.write('<style>body{background-color:#0e1117;color:white;}</style>', unsafe_allow_html=True)
+        st.markdown('<style>body{background-color:#0e1117;color:white;}</style>', unsafe_allow_html=True)
     else:
-        st.write('<style>body{background-color:white;color:black;}</style>', unsafe_allow_html=True)
+        st.markdown('<style>body{background-color:white;color:black;}</style>', unsafe_allow_html=True)
 
     # Export button if filtered data available
     if 'filtered_df' in st.session_state:
         df_xlsx = to_excel(st.session_state.filtered_df)
         st.download_button(label="Download Filtered Data as Excel", data=df_xlsx, file_name="filtered_data.xlsx")
 
-# Defaults for session state
+# Session state defaults
 if 'page_state' not in st.session_state:
     st.session_state.page_state = 'initial'
 if 'data_frames' not in st.session_state:
@@ -192,6 +204,7 @@ if st.session_state.page_state == 'data_loaded':
             st.subheader("Summary Statistics")
             st.dataframe(filtered_df.describe())
 
+            # Geo plot
             country_cols = [col for col in filtered_df.columns if 'country' in col.lower()]
             gdp_cols = [col for col in filtered_df.columns if any(key in col.lower() for key in ['gdp', 'income', 'per capita'])]
             if country_cols and gdp_cols:
