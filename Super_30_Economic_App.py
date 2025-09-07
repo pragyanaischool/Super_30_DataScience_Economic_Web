@@ -21,38 +21,23 @@ st.set_page_config(
 st.title("Advanced Economic Data Analytics & Report Generator")
 st.markdown("---")
 
-# Dictionary of pre-configured websites and their scraping hints
-WEBSITES = {
-    "IMF Data (Placeholder)": {
-        "url": "https://www.imf.org/external/datamapper/datasets",
-        "description": "IMF's DataMapper section. Scraped tables may be incomplete.",
-        "placeholder": True
-    },
-    "World Bank (Placeholder)": {
-        "url": "https://data.worldbank.org/indicator/NY.GDP.MKTP.CD",
-        "description": "World Bank GDP data. Scraped tables may be incomplete.",
-        "placeholder": True
-    },
-    "Google Finance": {
-        "url": "https://www.google.com/finance/",
-        "description": "Google Finance provides real-time stock quotes, charts, and news.",
-        "placeholder": True
-    }
-}
-
 @st.cache_data(ttl=3600)
-def scrape_tables_from_url(url):
-    """Scrapes all tables from a given URL and returns them as a list of pandas DataFrames."""
+def scrape_tables_from_url(url, table_index=None):
+    """Scrapes tables from a given URL; if table_index given, returns that table only."""
     try:
         response = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
         if response.status_code == 200:
-            soup = BeautifulSoup(response.content, 'html.parser')
-            tables = soup.find_all('table')
+            tables = pd.read_html(response.content)
             if not tables:
                 st.warning("No tables were found on the provided URL.")
                 return []
-            dfs = pd.read_html(response.content)
-            return dfs
+            if table_index is not None:
+                if 0 <= table_index < len(tables):
+                    return [tables[table_index]]
+                else:
+                    st.error(f"Table index {table_index} is out of range. URL has {len(tables)} tables.")
+                    return []
+            return tables
         else:
             st.error(f"Failed to retrieve content from {url}. Status code: {response.status_code}")
             return []
@@ -96,37 +81,6 @@ def create_pdf_report(title, data_md, analysis_text, chart_path=None):
     pdf.output(tmp_file.name)
     return tmp_file.name
 
-# --- Sidebar UI for Data Selection ---
-with st.sidebar:
-    st.header("Settings")
-    selected_website = st.selectbox("Select a Website to Scrape:", list(WEBSITES.keys()))
-    st.markdown(f"**Description:** {WEBSITES[selected_website]['description']}")
-    if st.button("Scrape Data from Selected Site") or (not st.session_state.get('data_frames')):
-        st.session_state.data_frames = scrape_tables_from_url(WEBSITES[selected_website]["url"])
-        if not st.session_state.get('data_frames'):
-            st.session_state.data_frames = []
-        st.session_state.page_state = 'data_loaded'
-        st.success("Data scraped successfully! Select table and options below.")
-
-    # Theme selector
-    theme = st.selectbox("Select Theme:", ["Light", "Dark"])
-    if theme == "Dark":
-        st.write('<style>body{background-color:#0e1117;color:white;}</style>', unsafe_allow_html=True)
-    else:
-        st.write('<style>body{background-color:white;color:black;}</style>', unsafe_allow_html=True)
-
-    # Export button
-    if 'filtered_df' in st.session_state:
-        df_xlsx = to_excel(st.session_state.filtered_df)
-        st.download_button(label="Download Filtered Data as Excel", data=df_xlsx, file_name="filtered_data.xlsx")
-
-# Initialize session state
-if 'page_state' not in st.session_state:
-    st.session_state.page_state = 'initial'
-if 'data_frames' not in st.session_state:
-    st.session_state.data_frames = []
-
-# --- Geo Plot function for Country GDP visualization ---
 def plot_gdp_geoplot(df, country_col, gdp_col):
     try:
         world = gpd.read_file(gpd.datasets.get_path('naturalearth_lowres'))
@@ -149,13 +103,68 @@ def plot_gdp_geoplot(df, country_col, gdp_col):
     except Exception as e:
         st.error(f"Error generating Geo plot: {e}")
 
-# --- Main Content UI ---
+# Sidebar: Select input mode and capture inputs
+with st.sidebar:
+    st.header("Data Input Options")
+    input_mode = st.radio("Select Input Mode:", ["Website Scraping", "Upload CSV File"])
+
+    if input_mode == "Website Scraping":
+        url_input = st.text_area("Paste Website URL here:", height=80)
+        table_idx_input = st.number_input("Table Index (0-based):", min_value=0, step=1)
+        scrape_button = st.button("Scrape Website Data")
+
+        if scrape_button:
+            if not url_input.strip():
+                st.warning("Please enter a valid URL.")
+            else:
+                st.session_state.data_frames = scrape_tables_from_url(url_input.strip(), table_idx_input)
+                if not st.session_state.data_frames:
+                    st.session_state.data_frames = []
+                    st.warning("No tables could be scraped from the URL or invalid table index.")
+                else:
+                    st.session_state.page_state = 'data_loaded'
+                    st.success(f"Scraped {len(st.session_state.data_frames)} table(s) successfully.")
+
+    elif input_mode == "Upload CSV File":
+        uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
+        upload_button = st.button("Load Uploaded File")
+
+        if upload_button:
+            if uploaded_file is not None:
+                try:
+                    df = pd.read_csv(uploaded_file)
+                    st.session_state.data_frames = [df]
+                    st.session_state.page_state = 'data_loaded'
+                    st.success("CSV file loaded successfully!")
+                except Exception as e:
+                    st.error(f"Error loading CSV file: {e}")
+            else:
+                st.warning("Please upload a CSV file.")
+
+    # Theme selector
+    theme = st.selectbox("Select Theme:", ["Light", "Dark"])
+    if theme == "Dark":
+        st.write('<style>body{background-color:#0e1117;color:white;}</style>', unsafe_allow_html=True)
+    else:
+        st.write('<style>body{background-color:white;color:black;}</style>', unsafe_allow_html=True)
+
+    # Export button
+    if 'filtered_df' in st.session_state:
+        df_xlsx = to_excel(st.session_state.filtered_df)
+        st.download_button(label="Download Filtered Data as Excel", data=df_xlsx, file_name="filtered_data.xlsx")
+
+# Initialize session state
+if 'page_state' not in st.session_state:
+    st.session_state.page_state = 'initial'
+if 'data_frames' not in st.session_state:
+    st.session_state.data_frames = []
+
+# Main UI after data load
 if st.session_state.page_state == 'data_loaded':
     if not st.session_state.data_frames:
-        st.warning("No data frames were scraped. Please try again or select a different site.")
+        st.warning("No data loaded. Use the sidebar to scrape or upload data.")
     else:
         st.subheader("Tables Overview")
-
         tabs = st.tabs([f"Table {i+1}" for i in range(len(st.session_state.data_frames))])
         selected_df = None
         for i, tab in enumerate(tabs):
@@ -182,7 +191,7 @@ if st.session_state.page_state == 'data_loaded':
             st.subheader("Summary Statistics")
             st.dataframe(filtered_df.describe())
 
-            # Geo plot
+            # Geo plot section
             country_cols = [col for col in filtered_df.columns if 'country' in col.lower()]
             gdp_cols = [col for col in filtered_df.columns if any(key in col.lower() for key in ['gdp', 'income', 'per capita'])]
             if country_cols and gdp_cols:
@@ -275,4 +284,4 @@ if st.session_state.page_state == 'data_loaded':
                     st.warning("Please generate a chart and write an analysis before exporting the report.")
 
 else:
-    st.info("Select a website and scrape data using the sidebar options.")
+    st.info("Select a data input method from the sidebar and provide input to load data.")
