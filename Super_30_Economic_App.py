@@ -7,8 +7,10 @@ import tempfile
 from fpdf import FPDF
 import plotly.express as px
 import geopandas as gpd
+import numpy as np
+import re
 
-# --- Config & Helpers ---
+# --- Configuration and Helpers ---
 st.set_page_config(
     page_title="Advanced Economic Data Dashboard",
     layout="wide",
@@ -46,6 +48,59 @@ def scrape_tables_from_url(url):
         st.error(f"Error during web scraping: {e}")
         return []
 
+def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Perform comprehensive cleaning on the dataframe."""
+
+    # Drop duplicate rows
+    df = df.drop_duplicates()
+
+    # Reset index
+    df = df.reset_index(drop=True)
+
+    # Clean column names: strip spaces, lower case, replace spaces and special chars with underscores
+    cleaned_cols = []
+    for col in df.columns:
+        if isinstance(col, tuple):
+            # Flatten MultiIndex columns by joining with underscore
+            col = '_'.join([str(x).strip().replace(' ', '_').lower() for x in col])
+        else:
+            col = str(col).strip().replace('\n', ' ').replace(' ', '_').lower()
+            col = re.sub(r'\W+', '_', col)  # Replace non-alphanumeric with underscore
+        cleaned_cols.append(col)
+    df.columns = cleaned_cols
+
+    # Fix missing values:
+    # For numeric columns, fill NaNs with median if exists else 0
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    for col in numeric_cols:
+        median_val = df[col].median()
+        fill_val = median_val if not pd.isna(median_val) else 0
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+        df[col] = df[col].fillna(fill_val)
+
+    # For object columns, fill NaNs with empty string
+    object_cols = df.select_dtypes(include=['object']).columns
+    for col in object_cols:
+        df[col] = df[col].fillna('')
+
+    # Clean numeric data stored as strings with commas or other chars, convert to numeric
+    for col in df.columns:
+        if col in numeric_cols:
+            continue
+        # Try to clean numeric columns stored as strings
+        try:
+            df[col] = df[col].astype(str).str.replace(r'[^\d.-]', '', regex=True)
+            maybe_num = pd.to_numeric(df[col], errors='coerce')
+            # If more than 50% converted, replace column data
+            if maybe_num.notna().sum() > 0.5*len(df):
+                df[col] = maybe_num.fillna(0)
+                if col not in numeric_cols:
+                    numeric_cols = numeric_cols.append(pd.Index([col]))
+        except Exception:
+            pass  # Ignore conversion failures
+
+    return df
+
 def filter_numeric_range(df, col):
     if not pd.api.types.is_numeric_dtype(df[col]):
         return df
@@ -54,10 +109,17 @@ def filter_numeric_range(df, col):
     filtered = df[(df[col] >= selected_range[0]) & (df[col] <= selected_range[1])]
     return filtered
 
-def to_excel(df):
+def to_excel(df: pd.DataFrame):
+    """Convert cleaned DataFrame to Excel binary data with safe fallback for MultiIndex columns."""
     output = BytesIO()
+    df_to_save = df.copy()
+
+    # Flatten MultiIndex columns if present
+    if isinstance(df.columns, pd.MultiIndex):
+        df_to_save.columns = ['_'.join([str(i) for i in col]).strip() for col in df.columns.values]
+
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Data')
+        df_to_save.to_excel(writer, index=False, sheet_name='Data')
     return output.getvalue()
 
 def create_pdf_report(title, data_md, analysis_text, chart_path=None):
@@ -114,7 +176,9 @@ with st.sidebar:
             else:
                 tables = scrape_tables_from_url(url_input)
                 if tables:
-                    st.session_state.scraped_tables = tables
+                    # Clean each table immediately after scraping
+                    cleaned_tables = [clean_dataframe(df) for df in tables]
+                    st.session_state.scraped_tables = cleaned_tables
                     st.session_state.page_state = "table_selection"
                     st.session_state.url_for_scrape = url_input
                 else:
@@ -145,9 +209,10 @@ with st.sidebar:
             if uploaded_file is not None:
                 try:
                     df = pd.read_csv(uploaded_file)
+                    df = clean_dataframe(df)
                     st.session_state.data_frames = [df]
                     st.session_state.page_state = 'data_loaded'
-                    st.success("CSV file loaded successfully!")
+                    st.success("CSV file loaded and cleaned successfully!")
                 except Exception as e:
                     st.error(f"Error loading CSV file: {e}")
             else:
@@ -162,8 +227,11 @@ with st.sidebar:
 
     # Export filtered data if available
     if 'filtered_df' in st.session_state:
-        df_xlsx = to_excel(st.session_state.filtered_df)
-        st.download_button(label="Download Filtered Data as Excel", data=df_xlsx, file_name="filtered_data.xlsx")
+        try:
+            df_xlsx = to_excel(st.session_state.filtered_df)
+            st.download_button(label="Download Filtered Data as Excel", data=df_xlsx, file_name="filtered_data.xlsx")
+        except Exception as e:
+            st.error(f"Error generating Excel download: {e}")
 
 # Ensure defaults
 if 'page_state' not in st.session_state:
@@ -190,6 +258,7 @@ if st.session_state.page_state == 'data_loaded':
         if selected_df is not None:
             st.markdown("---")
             st.subheader("Data Filtering")
+
             numeric_cols = [col for col in selected_df.columns if pd.api.types.is_numeric_dtype(selected_df[col])]
             filtered_df = selected_df.copy()
             for col in numeric_cols:
@@ -215,6 +284,7 @@ if st.session_state.page_state == 'data_loaded':
 
             st.markdown("---")
             st.subheader("Chart Customization")
+
             available_columns = list(filtered_df.columns)
             x_axis_col = st.selectbox("Select X-Axis Column:", available_columns, key="x_axis")
             y_axis_col = st.selectbox("Select Y-Axis Column:", numeric_cols, key="y_axis")
@@ -242,9 +312,11 @@ if st.session_state.page_state == 'data_loaded':
                             plot_df = plot_df.groupby(group_col)[y_axis_col].agg(agg_func.lower()).reset_index()
                             y_axis_col_plot = y_axis_col
                     else:
-                        y_axis_col_plot = y_axis
+                        y_axis_col_plot = y_axis_col
+
                     plot_df[y_axis_col_plot] = pd.to_numeric(plot_df[y_axis_col_plot], errors='coerce')
                     plot_df = plot_df.dropna(subset=[y_axis_col_plot])
+
                     if chart_type == "Line Chart":
                         fig = px.line(plot_df, x=x_axis_col if group_col is None else group_col, y=y_axis_col_plot, color=color_col)
                     elif chart_type == "Bar Chart":
@@ -257,11 +329,14 @@ if st.session_state.page_state == 'data_loaded':
                         fig = px.box(plot_df, x=x_axis_col if group_col is None else group_col, y=y_axis_col_plot, color=color_col)
                     elif chart_type == "Histogram":
                         fig = px.histogram(plot_df, x=y_axis_col_plot, color=color_col)
+
                     st.plotly_chart(fig, use_container_width=True)
+
                     chart_path = "chart.png"
                     fig.write_image(chart_path)
                     st.session_state.chart_path = chart_path
                     st.session_state.chart_generated = True
+
                 except Exception as e:
                     st.error(f"Error generating chart: {e}")
             else:
@@ -270,6 +345,7 @@ if st.session_state.page_state == 'data_loaded':
             st.markdown("---")
             st.subheader("Analysis & Report")
             user_analysis = st.text_area("Enter your detailed analysis here:", height=250)
+
             if st.button("Generate PDF Report"):
                 if user_analysis and selected_df is not None:
                     data_md = filtered_df.head(500).to_markdown(index=False)
@@ -286,5 +362,6 @@ if st.session_state.page_state == 'data_loaded':
                         st.markdown(href, unsafe_allow_html=True)
                 else:
                     st.warning("Please generate a chart and write an analysis before exporting the report.")
+
 else:
     st.info("Select a data input method from the sidebar and paste a URL to parse tables, then select tables to proceed.")
