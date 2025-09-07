@@ -1,0 +1,11 @@
+streamlit
+pandas
+requests
+beautifulsoup4
+plotly
+numpy
+fpdf
+xlsxwriter
+geopandas
+pyproj
+shapely
